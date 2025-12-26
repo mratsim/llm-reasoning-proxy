@@ -59,10 +59,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@${{ env.rust_version }}
         with:
           components: rustfmt
-          toolchain: ${{ env.rust_version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
@@ -72,10 +71,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@${{ env.rust_version }}
         with:
           components: clippy
-          toolchain: ${{ env.rust_version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --verbose --release --tests --all-features
 
