@@ -49,10 +49,7 @@ jobs:
         run: cargo build --release
       - name: Test
         run: |
-          cargo nextest run --profile ci --release
-      # - name: Doctests # nextest does not support doc tests
-      #   run: |
-      #     cargo test --doc
+          cargo test --release
 
   fmt:
     if: github.event.pull_request.draft == false
