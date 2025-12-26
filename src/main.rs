@@ -84,7 +84,9 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port))
         .await
         .expect("Failed to bind to port");
-    axum::serve(listener, app).await.expect("Error running server");
+    axum::serve(listener, app)
+        .await
+        .expect("Error running server");
 }
 
 // Networking
