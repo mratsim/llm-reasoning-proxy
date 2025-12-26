@@ -247,7 +247,15 @@ async fn wait_for_port(port: u16) {
 
 macro_rules! assert_header_propagation {
     ($resp:expr) => {
-        assert_eq!($resp.headers().get("x-custom-upstream").unwrap().to_str().unwrap(), "valid")
+        assert_eq!(
+            $resp
+                .headers()
+                .get("x-custom-upstream")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "valid"
+        )
     };
 }
 
