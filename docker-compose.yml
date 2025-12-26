@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  proxy:
+    build: .
+    ports:
+      - "5001:5001"
+    environment:
+      - RUST_LOG=info
+    # Use
+    # - host.containers.internal   for podman
+    # - host.docker.internal       for docker
+    command: ["--port", "5001", "--upstream", "http://host.containers.internal:5000"]
