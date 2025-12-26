@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use bytes::Bytes;
 use serde_json::Value;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use clap::Parser;
 
@@ -94,6 +94,7 @@ async fn proxy_handler(
     State(state): State<AppState>,
     mut req: Request,
 ) -> Result<Response, StatusCode> {
+    // 1. Read body to determine streaming state
     let body_bytes = req
         .body_mut()
         .collect()
@@ -105,104 +106,117 @@ async fn proxy_handler(
         .to_bytes();
 
     let is_streaming = logic::is_streaming(&body_bytes);
+
+    // 2. Construct Upstream Request
     let upstream_uri = format!(
         "{}{}",
         state.upstream_url,
         req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
     );
 
-    let mut upstream_req = state.client.request(req.method().clone(), &upstream_uri);
+    let upstream_req = state
+        .client
+        .request(req.method().clone(), &upstream_uri)
+        .body(body_bytes); // Body implies cloning bytes internally, which is cheap (Arc)
 
-    // Pass the builder and get it back
-    upstream_req = filter_headers(req.headers(), upstream_req);
-    upstream_req = upstream_req.body(body_bytes.clone());
+    // Apply headers
+    let upstream_req = prepare_upstream_headers(req.headers(), upstream_req);
 
     info!(
-        "Proxying {} to {} (stream: {})",
+        "Proxying {} -> {} (stream: {})",
         req.uri().path(),
         upstream_uri,
         is_streaming
     );
 
-    match upstream_req.send().await {
-        Ok(upstream_resp) => {
-            let status = upstream_resp.status();
-            info!("Upstream response status: {}", status);
+    // 3. Send Request
+    let upstream_resp = upstream_req.send().await.map_err(|e| {
+        error!("Upstream request failed: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
 
-            let mut resp_builder = Response::builder().status(status);
+    // 4. Build Response
+    let status = upstream_resp.status();
+    let mut resp_builder = Response::builder().status(status);
 
-            // Proxy headers (excluding problematic ones, content-length might change)
-            for (name, value) in upstream_resp.headers() {
-                if !matches!(
-                    name.as_str(),
-                    "transfer-encoding" | "content-encoding" | "content-length"
-                ) {
-                    resp_builder = resp_builder.header(name, value);
-                }
-            }
+    // Copy headers from upstream to downstream
+    resp_builder = copy_response_headers(upstream_resp.headers(), resp_builder);
 
-            if is_streaming {
-                let stream = process_sse_stream(upstream_resp.bytes_stream());
-                resp_builder
-                    .header("content-type", "text/event-stream")
-                    .body(Body::from_stream(stream))
-                    .map_err(|e| {
-                        error!("Failed to build streaming response: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
-            } else {
-                let text = upstream_resp.text().await.map_err(|e| {
-                    error!("Response body read error: {}", e);
-                    StatusCode::BAD_GATEWAY
-                })?;
+    if is_streaming {
+        // SSE Case
+        let stream = process_sse_stream(upstream_resp.bytes_stream());
+        resp_builder
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(stream))
+            .map_err(|e| {
+                error!("Failed to build stream response: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
+    } else {
+        // Standard JSON Case
+        let text = upstream_resp.text().await.map_err(|e| {
+            error!("Response body read error: {}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
 
-                let modified = logic::transform_non_streaming(&text);
-                debug!(
-                    "Modified response ({} bytes): {}",
-                    modified.as_bytes().len(),
-                    modified
-                );
+        let modified = logic::transform_non_streaming(&text);
 
-                resp_builder
-                    .header("content-type", "application/json")
-                    .header("content-length", modified.as_bytes().len())
-                    .body(Body::from(modified))
-                    .map_err(|e| {
-                        error!("Failed to build non-streaming response: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })
-            }
-        }
-        Err(e) => {
-            error!("Upstream request failed: {}", e);
-            Err(StatusCode::BAD_GATEWAY)
-        }
+        resp_builder
+            .header("content-type", "application/json")
+            // Recalculate length after modification
+            .header("content-length", modified.len())
+            .body(Body::from(modified))
+            .map_err(|e| {
+                error!("Failed to build json response: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
     }
 }
 
-/// Helper to filter and map headers
-/// Takes ownership of builder and returns it because reqwest builders consume self
-fn filter_headers(
+// Helpers
+// ------------------------------------------------------------
+
+/// Filters and maps headers from Client -> Upstream
+fn prepare_upstream_headers(
     headers: &HeaderMap,
-    req_builder: reqwest::RequestBuilder,
+    builder: reqwest::RequestBuilder,
 ) -> reqwest::RequestBuilder {
-    let mut builder = req_builder;
+    let mut builder = builder;
     for (name, value) in headers {
-        match name.as_str() {
-            "host" | "content-length" | "connection" => continue,
-            "authorization" | "content-type" | "user-agent" | "accept" => {
-                builder = builder.header(name, value);
-            }
-            n if n.starts_with("x-") => {
-                builder = builder.header(name, value);
-            }
-            _ => {}
+        let n = name.as_str();
+        if matches!(n, "host" | "content-length" | "connection") {
+            continue;
+        }
+        if matches!(
+            n,
+            "authorization" | "content-type" | "user-agent" | "accept"
+        ) || n.starts_with("x-")
+        {
+            builder = builder.header(name, value);
         }
     }
     builder
 }
 
-/// Processes the SSE stream using LinesCodec for non-buffered streaming
+/// Filters and maps headers from Upstream -> Client
+fn copy_response_headers(
+    headers: &HeaderMap,
+    builder: axum::http::response::Builder,
+) -> axum::http::response::Builder {
+    let mut builder = builder;
+    for (name, value) in headers {
+        // Don't copy transfer-encoding (axum handles chunks) or length (we might change it)
+        if !matches!(
+            name.as_str(),
+            "transfer-encoding" | "content-encoding" | "content-length"
+        ) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder
+}
+
+/// Processes the SSE stream
 fn process_sse_stream(
     upstream_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 ) -> PinBoxStream {
@@ -211,57 +225,40 @@ fn process_sse_stream(
 
     Box::pin(async_stream::try_stream! {
         let mut state = StreamState::default();
-
-        debug!("SSE Stream processing started.");
         tokio::pin!(lines);
 
-        let mut line_count = 0;
-
         while let Some(line_result) = lines.next().await {
-            line_count += 1;
-            let line = line_result.map_err(|e| {
-                error!("Error reading line {}: {}", line_count, e);
-                axum::Error::new(e)
-            })?;
+            let line = line_result.map_err(axum::Error::new)?;
+            let trimmed = line.trim();
 
-            // Trim whitespace but preserve content for debug
-            let line = line.trim();
-
-            // Log periodically or for specific events
-            if line_count % 100 == 0 || line.contains("[DONE]") {
-                debug!("Stream line {}: {} chars", line_count, line.len());
-            }
-
-            if line.is_empty() {
+            if trimmed.is_empty() {
                 continue;
             }
 
-            if line == "data: [DONE]" {
-                debug!("Received [DONE] from upstream after {} lines.", line_count);
+            // 1. Handle Done
+            if trimmed == "data: [DONE]" {
                 yield "data: [DONE]\n\n".into();
                 break;
             }
 
-            if let Some(json_str) = line.strip_prefix("data: ") {
+            // 2. Handle Data
+            if let Some(json_str) = trimmed.strip_prefix("data: ") {
                 match serde_json::from_str::<Value>(json_str) {
                     Ok(mut val) => {
                         logic::transform_stream_chunk(&mut val, &mut state);
                         yield format!("data: {}\n\n", val).into();
                     }
                     Err(e) => {
-                        error!("Failed to parse JSON at line {}: '{}'. Error: {}", line_count, json_str, e);
-                        // Forward a specific error so the client knows why it stopped, if we choose to stop
-                        yield format!("data: {{\"error\": \"Proxy JSON Parse Error: {}\"}}\n\n", e).into();
+                        // Log parsing error but keep stream alive or send error frame
+                        error!("JSON Parse Error: {}. Chunk: {}", e, json_str);
+                        yield format!("data: {{\"error\": \"Proxy Parse Error\"}}\n\n").into();
                     }
                 }
             } else {
-                // SSE Comment or other control lines
-                debug!("Non-data line: {}", line);
-                // Forward non-data lines as is
-                yield format!("{}\n", line).into();
+                // 3. Pass through comments or other events unmodified
+                yield format!("{}\n", trimmed).into();
             }
         }
-        debug!("SSE Stream processing ended after {} lines.", line_count);
     })
 }
 
@@ -310,40 +307,43 @@ mod logic {
     }
 
     pub fn transform_stream_chunk(val: &mut Value, state: &mut StreamState) {
-        if let Some(delta) = get_mut_delta(val) {
-            let reasoning = delta.remove("reasoning_content");
-            let content = delta
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+        let Some(delta) = get_mut_delta(val) else {
+            return;
+        };
 
-            let mut output = String::new();
+        // 1. Extract values
+        let r_val_opt = delta.remove("reasoning_content");
+        let r_str = r_val_opt.as_ref().and_then(|v| v.as_str()).unwrap_or("");
 
-            if let Some(r) = reasoning {
-                let r_text = r.as_str().unwrap_or("");
-                if !r_text.is_empty() {
-                    if !state.is_thinking {
-                        output.push_str("<think>");
-                        state.is_thinking = true;
-                    }
-                    output.push_str(r_text);
-                }
-            }
+        let c_str = delta.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-            if let Some(c_text) = content {
-                if !c_text.is_empty() {
-                    if state.is_thinking {
-                        output.push_str("</think>");
-                        state.is_thinking = false;
-                    }
-                    output.push_str(&c_text);
-                }
-            }
-
-            if !output.is_empty() {
-                delta.insert("content".to_string(), serde_json::json!(output));
-            }
+        // 2. Early return if nothing to do
+        if r_str.is_empty() && c_str.is_empty() {
+            return;
         }
+
+        let mut output = String::with_capacity(r_str.len() + c_str.len() + 16);
+
+        // 3. Handle Reasoning
+        if !r_str.is_empty() {
+            if !state.is_thinking {
+                output.push_str("<think>");
+                state.is_thinking = true;
+            }
+            output.push_str(r_str);
+        }
+
+        // 4. Handle Content
+        if !c_str.is_empty() {
+            if state.is_thinking {
+                output.push_str("</think>");
+                state.is_thinking = false;
+            }
+            output.push_str(c_str);
+        }
+
+        // 5. Save result
+        delta.insert("content".to_string(), output.into());
     }
 
     // Helper to flatten deep navigation, handling mutable array access correctly
