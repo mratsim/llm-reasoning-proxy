@@ -112,6 +112,13 @@ const MOCK_UPSTREAM_PORT: u16 = 5556;
 
 /// Configuration injected into the request body by the test
 /// to tell the Mock Server what to return.
+///
+/// # Priority Order
+/// When multiple fields are set:
+/// 1. `response_status` (if not 200) - returns immediately with that status
+/// 2. `response_stream` - returns SSE stream
+/// 3. `response_json` - returns JSON response
+/// 4. Falls back to 404 if none are provided
 #[derive(Debug, Deserialize)]
 struct MockConfig {
     /// If present, return this JSON immediately (non-streaming).
@@ -185,18 +192,14 @@ async fn mock_upstream_handler(
                     sleep(Duration::from_millis(chunk.delay_ms)).await;
                 }
 
-                if chunk.body == "[DONE]" {
-                    yield Ok::<_, axum::Error>(bytes::Bytes::from("data: [DONE]\n\n"));
-                } else {
-                    yield Ok::<_, axum::Error>(bytes::Bytes::from(format!("data: {}\n\n", chunk.body)));
-                }
+                yield Ok::<_, axum::Error>(bytes::Bytes::from(format!("data: {}\n\n", chunk.body)));
             }
         };
 
         let response = Response::builder()
             .status(200)
             .header("content-type", "text/event-stream")
-            .header("x-custom-upstream", "valid")
+            .header("x-custom-upstream", "valid") // Test header propagation
             .body(axum::body::Body::from_stream(stream))
             .unwrap();
 
@@ -208,6 +211,7 @@ async fn mock_upstream_handler(
         let response = Response::builder()
             .status(200)
             .header("content-type", "application/json")
+            .header("x-custom-upstream", "valid")
             .body(axum::body::Body::from(json_body.to_string()))
             .unwrap();
 
@@ -240,6 +244,12 @@ async fn wait_for_port(port: u16) {
 
 // Tests
 // ------------------------------------------------------------
+
+macro_rules! assert_header_propagation {
+    ($resp:expr) => {
+        assert_eq!($resp.headers().get("x-custom-upstream").unwrap().to_str().unwrap(), "valid")
+    };
+}
 
 #[tokio::test]
 #[serial]
@@ -283,6 +293,7 @@ async fn test_non_streaming_reasoning() {
     // ASSERTIONS
     // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
+    assert_header_propagation!(resp);
 
     let body: serde_json::Value = resp.json().await.expect("Failed to parse response");
     let content = body["choices"][0]["message"]["content"].as_str().unwrap();
@@ -340,6 +351,7 @@ async fn test_reasoning_streaming() {
     // ASSERTIONS
     // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
+    assert_header_propagation!(resp);
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
@@ -486,6 +498,7 @@ async fn test_passthrough_no_reasoning_streaming() {
     // ASSERTIONS
     // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
+    assert_header_propagation!(resp);
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
