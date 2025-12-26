@@ -455,7 +455,7 @@ async fn test_passthrough_no_reasoning_json() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let content = body["choices"][0]["message"]["content"].as_str().unwrap();
 
-    // Verify NO <think> tags injected
+    // Should NOT contain <think> tags, just the original content
     assert_eq!(content, "Just Answer");
 }
 
@@ -516,9 +516,16 @@ async fn test_passthrough_no_reasoning_streaming() {
         buffer.push_str(&String::from_utf8_lossy(&item.unwrap()));
     }
 
-    // Verify standard streaming behavior without modification
+
+    // Verify:
+    // 1. Data arrived
     assert!(buffer.contains("Hello"));
     assert!(buffer.contains(" World"));
+
+    // 2. No <think> tags were injected
     assert!(!buffer.contains("<think>"));
+    assert!(!buffer.contains("</think>"));
+
+    // 3. Stream ended correctly
     assert!(buffer.contains("[DONE]"));
 }
