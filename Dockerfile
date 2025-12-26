@@ -10,10 +10,17 @@ WORKDIR /app
 
 # Copy source code
 COPY Cargo.toml Cargo.lock ./
+
+# Build dependencies to cache them
+RUN mkdir src && \
+    echo 'fn main() {}' > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# Copy the actual source code
 COPY src ./src
 
-# Build the application in release mode
-# --release creates a smaller, optimized binary
+# Build the application, this will use the cached dependencies
 RUN cargo build --release
 
 # Stage 2: Runtime

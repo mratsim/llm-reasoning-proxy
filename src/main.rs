@@ -143,10 +143,13 @@ async fn proxy_handler(
 
             if is_streaming {
                 let stream = process_sse_stream(upstream_resp.bytes_stream());
-                Ok(resp_builder
+                resp_builder
                     .header("content-type", "text/event-stream")
                     .body(Body::from_stream(stream))
-                    .unwrap())
+                    .map_err(|e| {
+                        error!("Failed to build streaming response: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
             } else {
                 let text = upstream_resp.text().await.map_err(|e| {
                     error!("Response body read error: {}", e);
@@ -160,11 +163,14 @@ async fn proxy_handler(
                     modified
                 );
 
-                Ok(resp_builder
+                resp_builder
                     .header("content-type", "application/json")
-                    // .header("content-length", modified.as_bytes().len())
+                    .header("content-length", modified.as_bytes().len())
                     .body(Body::from(modified))
-                    .unwrap())
+                    .map_err(|e| {
+                        error!("Failed to build non-streaming response: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
             }
         }
         Err(e) => {
@@ -271,25 +277,23 @@ mod logic {
     }
 
     pub fn is_streaming(body: &[u8]) -> bool {
-        if let Ok(json) = serde_json::from_slice::<Value>(body) {
-            return json
-                .get("stream")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        }
-        false
+        serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|json| json.get("stream").and_then(|v| v.as_bool()))
+            .unwrap_or(false)
     }
 
     pub fn transform_non_streaming(json_str: &str) -> String {
         if let Ok(mut json) = serde_json::from_str::<Value>(json_str) {
             // Navigate to choices -> [i] -> message
-            if let Some(choices) = json.get_mut("choices").and_then(|v| v.as_array_mut()) {
-                if let Some(choice) = choices.first_mut() {
-                    if let Some(message) = choice.get_mut("message").and_then(|v| v.as_object_mut())
-                    {
-                        transform_message(message);
-                    }
-                }
+            if let Some(message) = json
+                .get_mut("choices")
+                .and_then(|v| v.as_array_mut())
+                .and_then(|choices| choices.first_mut())
+                .and_then(|choice| choice.get_mut("message"))
+                .and_then(|v| v.as_object_mut())
+            {
+                transform_message(message);
             }
             return json.to_string();
         }
@@ -297,20 +301,11 @@ mod logic {
     }
 
     pub fn transform_message(msg: &mut serde_json::Map<String, Value>) {
-        let reasoning = msg.remove("reasoning_content");
-        let content = msg.get_mut("content");
-
-        if let Some(r_val) = reasoning {
+        if let Some(r_val) = msg.remove("reasoning_content") {
             let wrapped = format!("<think>{}</think>", r_val.as_str().unwrap_or(""));
-            match content {
-                Some(c) if c.is_string() => {
-                    let current = c.as_str().unwrap_or("");
-                    *c = serde_json::json!(format!("{}{}", wrapped, current));
-                }
-                _ => {
-                    msg.insert("content".to_string(), serde_json::json!(wrapped));
-                }
-            }
+            let existing_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let new_content = format!("{}{}", wrapped, existing_content);
+            msg.insert("content".to_string(), serde_json::json!(new_content));
         }
     }
 
