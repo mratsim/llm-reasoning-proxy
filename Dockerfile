@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM rust:1.84-slim AS builder
+FROM rust:1.92-slim AS builder
 
 # Install dependencies needed for building reqwest (native-tls)
 RUN apt-get update && \

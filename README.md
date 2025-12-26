@@ -22,7 +22,7 @@ If you have the Rust toolchain installed, you can install directly from source:
 
 ```bash
 # From the local directory
-git clone github.com/mratsim/llm-reasoning-proxy
+git clone https://github.com/mratsim/llm-reasoning-proxy
 cargo install --path llm-reasoning-proxy
 
 # Or via git
@@ -61,7 +61,7 @@ podman run -p 5001:5001 \
 ### 🐳 Option 3: Docker-compose
 
 ```
-git clone github.com/mratsim/llm-reasoning-proxy
+git clone https://github.com/mratsim/llm-reasoning-proxy
 cd llm-reasoning-proxy
 docker-compose up -d
 ```

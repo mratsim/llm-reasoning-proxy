@@ -39,10 +39,8 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rs/toolchain@v1
-      # use the more efficient nextest
-      - uses: taiki-e/install-action@nextest
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
         # This build will be reused by nextest,
@@ -58,13 +56,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rs/toolchain@v1
-      - uses: Swatinem/rust-cache@v2
-      - run: rustup component add rustfmt
-      - uses: actions-rs/cargo@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          command: fmt
-          args: --all -- --check
+         components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
 
   clippy:
     if: github.event.pull_request.draft == false
@@ -72,15 +68,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Run clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --verbose --release --tests --all-features
+      - run: cargo clippy --verbose --release --tests --all-features
 
   typos:
     name: Spell Check with Typos
