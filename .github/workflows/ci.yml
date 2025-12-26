@@ -26,6 +26,7 @@ env:
   RUSTUP_MAX_RETRIES: 10
   # Don't emit giant backtraces in the CI logs.
   RUST_BACKTRACE: short
+  rust_version: '1.92'
 
 # Jobs launched for a PR event cancel the ongoing one for the same workflow + PR,
 # Only retries (of the same run) for a Push event cancel the prior one.
@@ -41,6 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.rust_version }}
       - uses: Swatinem/rust-cache@v2
       - name: Build
         # This build will be reused by nextest,
@@ -55,10 +58,11 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-         components: rustfmt
+          components: rustfmt
+          toolchain: ${{ env.rust_version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
@@ -67,10 +71,11 @@ jobs:
     name: Clippy lint checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          toolchain: ${{ env.rust_version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --verbose --release --tests --all-features
 
