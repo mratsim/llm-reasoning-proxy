@@ -10,3 +10,19 @@ services:
     # - host.containers.internal   for podman
     # - host.docker.internal       for docker
     command: ["--port", "5001", "--upstream", "http://host.containers.internal:5000"]
+version: '3.8'
+services:
+  proxy:
+    build: .
+    ports:
+      - "5001:5001"
+    environment:
+      - RUST_LOG=info
+    # Map 'host.docker.internal' on Linux environments
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Use
+    # - host.containers.internal   for podman
+    # - host.docker.internal       for docker
+    # Modify --upstream to point to your OpenAI Chat Completions provider
+    command: ["--port", "5001", "--upstream", "http://host.docker.internal:5000"]
