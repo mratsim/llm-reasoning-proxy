@@ -168,6 +168,12 @@ async fn mock_upstream_handler(
                 .status(status)
                 .body(axum::body::Body::from("Mock Error"))
                 .unwrap();
+        } else if config.response_stream.is_none() && config.response_json.is_none() {
+            // Explicit 200 with no other data - return empty success
+            return Response::builder()
+                .status(200)
+                .body(axum::body::Body::from("OK"))
+                .unwrap();
         }
     }
 
