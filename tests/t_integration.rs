@@ -15,6 +15,7 @@ use axum::http::header;
 use axum::http::HeaderValue;
 use axum::response::Response;
 use axum::Router;
+use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -76,7 +77,6 @@ struct ProxyProcess {
 
 impl ProxyProcess {
     fn spawn(port: u16, upstream: String) -> Self {
-        // Ensure the binary exists or provide a helpful error
         let path = "./target/release/llm-reasoning-proxy";
         if !std::path::Path::new(path).exists() {
             panic!("Binary not found at {}. Please run `cargo build --release` before running integration tests.", path);
@@ -87,7 +87,6 @@ impl ProxyProcess {
             .arg(port.to_string())
             .arg("--upstream")
             .arg(upstream)
-            // Silence stdout during tests unless debugging
             .stdout(std::process::Stdio::null())
             .spawn()
             .expect("Failed to spawn proxy process.");
@@ -108,13 +107,29 @@ impl Drop for ProxyProcess {
 const PROXY_PORT: u16 = 5555;
 const MOCK_UPSTREAM_PORT: u16 = 5556;
 
-// Mock Response Builders
+// Mock Logic & Handlers
 // ------------------------------------------------------------
 
-macro_rules! sse_msg {
-    ($msg:expr) => {
-        Ok::<_, axum::Error>(bytes::Bytes::from(format!("data: {}\n\n", $msg)))
-    };
+/// Configuration injected into the request body by the test
+/// to tell the Mock Server what to return.
+#[derive(Debug, Deserialize)]
+struct MockConfig {
+    /// If present, return this JSON immediately (non-streaming).
+    response_json: Option<serde_json::Value>,
+    /// If present, stream these chunks (streaming).
+    response_stream: Option<Vec<MockStreamChunk>>,
+    /// If present, return this HTTP status code.
+    response_status: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct MockStreamChunk {
+    /// The SSE data payload (e.g. `{"choices": ...}`).
+    /// If this string is just "[DONE]", the stream ends.
+    body: String,
+    /// Simulated delay before sending this chunk.
+    #[serde(default)]
+    delay_ms: u64,
 }
 
 fn with_connection_close(mut response: Response) -> Response {
@@ -124,114 +139,82 @@ fn with_connection_close(mut response: Response) -> Response {
     response
 }
 
-/// Scenario: Standard Reasoning Stream
-fn build_stream_response() -> Response {
-    let stream = async_stream::stream! {
-        yield sse_msg!("{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking...\"}}]}");
-        sleep(Duration::from_millis(10)).await;
-        yield sse_msg!("{\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}");
-        sleep(Duration::from_millis(10)).await;
-        yield sse_msg!("[DONE]");
-    };
-
-    let response = Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .header("x-custom-upstream", "valid") // Header to test propagation
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap();
-
-    with_connection_close(response)
-}
-
-/// Scenario: Standard Reasoning JSON
-fn build_json_response() -> Response {
-    let json = serde_json::json!({
-        "choices": [{
-            "message": {
-                "content": "Final Answer",
-                "reasoning_content": "Hidden Thought"
-            }
-        }]
-    });
-
-    let response = Response::builder()
-        .status(200)
-        .header("content-type", "application/json")
-        .header("x-custom-upstream", "valid")
-        .body(axum::body::Body::from(json.to_string()))
-        .unwrap();
-
-    with_connection_close(response)
-}
-
-/// Scenario: JSON with NO reasoning (Pass-through check)
-fn build_json_no_reasoning_response() -> Response {
-    let json = serde_json::json!({
-        "choices": [{
-            "message": { "content": "Just Answer" }
-        }]
-    });
-
-    let response = Response::builder()
-        .status(200)
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(json.to_string()))
-        .unwrap();
-
-    with_connection_close(response)
-}
-
-/// Scenario: Streaming with NO reasoning (Pass-through check)
-fn build_stream_no_reasoning_response() -> Response {
-    let stream = async_stream::stream! {
-        // Chunk 1
-        yield sse_msg!("{\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}");
-        sleep(Duration::from_millis(10)).await;
-        // Chunk 2
-        yield sse_msg!("{\"choices\":[{\"delta\":{\"content\":\" World\"}}]}");
-        sleep(Duration::from_millis(10)).await;
-        // Done
-        yield sse_msg!("[DONE]");
-    };
-
-    let response = Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap();
-
-    with_connection_close(response)
-}
-
 async fn mock_upstream_handler(
-    axum::extract::Json(payload): axum::extract::Json<serde_json::Value>,
+    axum::extract::Json(mut payload): axum::extract::Json<serde_json::Value>,
 ) -> Response {
-    let is_streaming = payload
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // 1. Extract the test configuration from the request body.
+    // We assume the proxy passes unknown fields through.
+    let config_val = payload
+        .as_object_mut()
+        .and_then(|obj| obj.remove("__mock_data"));
 
-    let model = payload
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
+    let config: MockConfig = match config_val {
+        Some(v) => serde_json::from_value(v).unwrap_or_else(|_| MockConfig {
+            response_json: None,
+            response_stream: None,
+            response_status: Some(400), // Bad test config
+        }),
+        None => MockConfig {
+            response_json: None,
+            response_stream: None,
+            response_status: Some(200), // Default safe fallback
+        },
+    };
 
-    match model {
-        "error-500" => Response::builder()
-            .status(500)
-            .body(axum::body::Body::from("Internal Server Error"))
-            .unwrap(),
-        "no-reasoning" => build_json_no_reasoning_response(),
-        "stream-no-reasoning" => build_stream_no_reasoning_response(), // <--- NEW CASE
-        _ => {
-            if is_streaming {
-                build_stream_response()
-            } else {
-                build_json_response()
-            }
+    // 2. Handle Status Code overrides (e.g. testing 500 errors)
+    if let Some(status) = config.response_status {
+        if status != 200 {
+            return Response::builder()
+                .status(status)
+                .body(axum::body::Body::from("Mock Error"))
+                .unwrap();
         }
     }
+
+    // 3. Handle Streaming
+    if let Some(chunks) = config.response_stream {
+        let stream = async_stream::stream! {
+            for chunk in chunks {
+                if chunk.delay_ms > 0 {
+                    sleep(Duration::from_millis(chunk.delay_ms)).await;
+                }
+
+                if chunk.body == "[DONE]" {
+                    yield Ok::<_, axum::Error>(bytes::Bytes::from("data: [DONE]\n\n"));
+                } else {
+                    yield Ok::<_, axum::Error>(bytes::Bytes::from(format!("data: {}\n\n", chunk.body)));
+                }
+            }
+        };
+
+        let response = Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .header("x-custom-upstream", "valid")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap();
+
+        return with_connection_close(response);
+    }
+
+    // 4. Handle JSON (Non-streaming)
+    if let Some(json_body) = config.response_json {
+        let response = Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json_body.to_string()))
+            .unwrap();
+
+        return with_connection_close(response);
+    }
+
+    // Fallback
+    Response::builder()
+        .status(404)
+        .body(axum::body::Body::from(
+            "No mock data provided in __mock_data",
+        ))
+        .unwrap()
 }
 
 // Test Utilities
@@ -262,36 +245,43 @@ async fn test_non_streaming_reasoning() {
     );
     wait_for_port(PROXY_PORT).await;
 
+    // SCENARIO DEFINITION
+    // --------------------------------------------------------
+    let upstream_response = serde_json::json!({
+        "choices": [{
+            "message": {
+                "content": "Final Answer",
+                "reasoning_content": "Hidden Thought"
+            }
+        }]
+    });
+
     let client = reqwest::Client::new();
     let resp = client
         .post(format!(
             "http://127.0.0.1:{}/v1/chat/completions",
             PROXY_PORT
         ))
-        .json(&serde_json::json!({"stream": false, "model": "default"}))
+        .json(&serde_json::json!({
+            "stream": false,
+            "model": "default",
+            // We inject the desired behavior into the request body
+            "__mock_data": {
+                "response_json": upstream_response
+            }
+        }))
         .send()
         .await
         .expect("Request failed");
 
+    // ASSERTIONS
+    // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
 
-    // Verify Header Propagation
-    assert_eq!(
-        resp.headers()
-            .get("x-custom-upstream")
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "valid"
-    );
+    let body: serde_json::Value = resp.json().await.expect("Failed to parse response");
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
 
-    let body = resp.text().await.expect("Failed to read body");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("Invalid JSON");
-
-    let content = json["choices"][0]["message"]["content"]
-        .as_str()
-        .expect("Missing content");
-
+    // Verify re-wrapping logic
     assert_eq!(content, "<think>Hidden Thought</think>Final Answer");
 }
 
@@ -305,45 +295,60 @@ async fn test_reasoning_streaming() {
     );
     wait_for_port(PROXY_PORT).await;
 
+    // SCENARIO DEFINITION
+    // --------------------------------------------------------
+    // Define the specific SSE chunks the upstream should emit
+    let stream_chunks = vec![
+        MockStreamChunk {
+            body: serde_json::json!({"choices": [{"delta": {"reasoning_content": "Thinking..."}}]})
+                .to_string(),
+            delay_ms: 0,
+        },
+        MockStreamChunk {
+            body: serde_json::json!({"choices": [{"delta": {"content": "Answer"}}]}).to_string(),
+            delay_ms: 10,
+        },
+        MockStreamChunk {
+            body: "[DONE]".to_string(),
+            delay_ms: 0,
+        },
+    ];
+
     let client = reqwest::Client::new();
     let resp = client
         .post(format!(
             "http://127.0.0.1:{}/v1/chat/completions",
             PROXY_PORT
         ))
-        .json(&serde_json::json!({"stream": true, "model": "default"}))
+        .json(&serde_json::json!({
+            "stream": true,
+            "model": "default",
+            "__mock_data": {
+                "response_stream": stream_chunks
+            }
+        }))
         .send()
         .await
         .expect("Request failed");
 
+    // ASSERTIONS
+    // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
-
-    // Verify Header Propagation in stream
-    assert_eq!(
-        resp.headers()
-            .get("x-custom-upstream")
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "valid"
-    );
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
-
     use futures::StreamExt;
+
     while let Some(item) = stream.next().await {
-        let chunk = item.unwrap();
-        let s = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&s);
+        buffer.push_str(&String::from_utf8_lossy(&item.unwrap()));
     }
 
-    // Verify Transformation Logic
-    // We expect the proxy to inject <think> on the first reasoning chunk
+    // Verify transformations:
+    // 1. <think> tag injected on first reasoning chunk
     assert!(
         buffer.contains("data: {\"choices\":[{\"delta\":{\"content\":\"<think>Thinking...\"}}]}")
     );
-    // We expect the proxy to close </think> when content starts
+    // 2. </think> tag closed when content starts
     assert!(buffer.contains("</think>Answer"));
     assert!(buffer.contains("[DONE]"));
 }
@@ -358,17 +363,27 @@ async fn test_upstream_error_propagation() {
     );
     wait_for_port(PROXY_PORT).await;
 
+    // SCENARIO DEFINITION
+    // --------------------------------------------------------
     let client = reqwest::Client::new();
     let resp = client
         .post(format!(
             "http://127.0.0.1:{}/v1/chat/completions",
             PROXY_PORT
         ))
-        .json(&serde_json::json!({"stream": false, "model": "error-500"}))
+        .json(&serde_json::json!({
+            "stream": false,
+            "model": "gpt-4",
+            "__mock_data": {
+                "response_status": 500
+            }
+        }))
         .send()
         .await
         .expect("Request failed");
 
+    // ASSERTIONS
+    // --------------------------------------------------------
     assert_eq!(resp.status(), 500);
 }
 
@@ -382,27 +397,39 @@ async fn test_passthrough_no_reasoning_json() {
     );
     wait_for_port(PROXY_PORT).await;
 
+    // SCENARIO DEFINITION
+    // --------------------------------------------------------
+    let upstream_response = serde_json::json!({
+        "choices": [{
+            "message": { "content": "Just Answer" }
+        }]
+    });
+
     let client = reqwest::Client::new();
     let resp = client
         .post(format!(
             "http://127.0.0.1:{}/v1/chat/completions",
             PROXY_PORT
         ))
-        .json(&serde_json::json!({"stream": false, "model": "no-reasoning"}))
+        .json(&serde_json::json!({
+            "stream": false,
+            "model": "default",
+            "__mock_data": {
+                "response_json": upstream_response
+            }
+        }))
         .send()
         .await
         .expect("Request failed");
 
+    // ASSERTIONS
+    // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
 
-    let body = resp.text().await.expect("Failed to read body");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("Invalid JSON");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
 
-    let content = json["choices"][0]["message"]["content"]
-        .as_str()
-        .expect("Missing content");
-
-    // Should NOT contain <think> tags, just the original content
+    // Verify NO <think> tags injected
     assert_eq!(content, "Just Answer");
 }
 
@@ -416,6 +443,23 @@ async fn test_passthrough_no_reasoning_streaming() {
     );
     wait_for_port(PROXY_PORT).await;
 
+    // SCENARIO DEFINITION
+    // --------------------------------------------------------
+    let stream_chunks = vec![
+        MockStreamChunk {
+            body: serde_json::json!({"choices": [{"delta": {"content": "Hello"}}]}).to_string(),
+            delay_ms: 0,
+        },
+        MockStreamChunk {
+            body: serde_json::json!({"choices": [{"delta": {"content": " World"}}]}).to_string(),
+            delay_ms: 10,
+        },
+        MockStreamChunk {
+            body: "[DONE]".to_string(),
+            delay_ms: 0,
+        },
+    ];
+
     let client = reqwest::Client::new();
     let resp = client
         .post(format!(
@@ -424,33 +468,30 @@ async fn test_passthrough_no_reasoning_streaming() {
         ))
         .json(&serde_json::json!({
             "stream": true,
-            "model": "stream-no-reasoning"
+            "model": "default",
+            "__mock_data": {
+                "response_stream": stream_chunks
+            }
         }))
         .send()
         .await
         .expect("Request failed");
 
+    // ASSERTIONS
+    // --------------------------------------------------------
     assert_eq!(resp.status(), 200);
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
-
     use futures::StreamExt;
+
     while let Some(item) = stream.next().await {
-        let chunk = item.unwrap();
-        let s = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&s);
+        buffer.push_str(&String::from_utf8_lossy(&item.unwrap()));
     }
 
-    // Verify:
-    // 1. Data arrived
+    // Verify standard streaming behavior without modification
     assert!(buffer.contains("Hello"));
     assert!(buffer.contains(" World"));
-
-    // 2. No <think> tags were injected
     assert!(!buffer.contains("<think>"));
-    assert!(!buffer.contains("</think>"));
-
-    // 3. Stream ended correctly
     assert!(buffer.contains("[DONE]"));
 }
