@@ -516,7 +516,6 @@ async fn test_passthrough_no_reasoning_streaming() {
         buffer.push_str(&String::from_utf8_lossy(&item.unwrap()));
     }
 
-
     // Verify:
     // 1. Data arrived
     assert!(buffer.contains("Hello"));
