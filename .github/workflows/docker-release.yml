@@ -1,11 +1,9 @@
-name: Nightly Build
+name: Docker Release Build
 
 on:
-  schedule:
-    # Runs at 00:00 UTC every day
-    - cron: '0 0 * * *'
-  # Allow manual trigger
-  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 env:
   REGISTRY: ghcr.io
@@ -43,8 +41,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=nightly
-            type=schedule,pattern=nightly-{{date 'YYYYMMDD'}}
+            type=ref,event=tag
+            type=raw,value=latest-{{sha}}
             type=sha,format=long
 
       - name: Build and push

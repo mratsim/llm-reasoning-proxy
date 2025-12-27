@@ -1,0 +1,118 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target.platform }} (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.os }}
+    strategy:
+      matrix:
+        target:
+          - { platform: Windows, arch: x86_64, os: windows-latest, target: x86_64-pc-windows-gnu }
+          - { platform: Windows, arch: ARM64, os: windows-latest, target: aarch64-pc-windows-msvc }
+          - { platform: macOS, arch: ARM64, os: macos-latest, target: aarch64-apple-darwin }
+          - { platform: Linux, arch: x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { platform: Linux, arch: ARM64, os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+      
+    steps:
+    - uses: actions/checkout@v5
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target.target }}
+        override: true
+    
+    - run: cargo build --release --target ${{ matrix.target.target }}
+    
+    - name: Strip executable (Linux)
+      if: matrix.target.os == 'ubuntu-latest'
+      run: strip target/${{ matrix.target.target }}/release/llm-reasoning-proxy
+    
+    - name: Create Windows archive
+      if: matrix.target.platform == 'Windows'
+      run: |
+        cd target/${{ matrix.target.target }}/release
+        7z a ../../../llm-reasoning-proxy-${{ matrix.target.arch }}-windows.zip llm-reasoning-proxy.exe
+    
+    - name: Create macOS/Linux archive
+      if: matrix.target.platform != 'Windows'
+      run: |
+        cd target/${{ matrix.target.target }}/release
+        tar -czvf ../../../llm-reasoning-proxy-${{ matrix.target.arch }}-${{ matrix.target.platform }}.tar.gz llm-reasoning-proxy
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: llm-reasoning-proxy-${{ matrix.target.platform }}-${{ matrix.target.arch }}-${{ env.VERSION }}
+        path: |
+          llm-reasoning-proxy-${{ matrix.target.arch }}-windows.zip
+          llm-reasoning-proxy-${{ matrix.target.arch }}-${{ matrix.target.platform }}.tar.gz
+        if-no-files-found: error
+
+  create-release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v7
+      with:
+        path: artifacts
+    
+    - name: Create release archive
+      run: |
+        cd artifacts
+        for dir in */; do
+          if [ -n "$dir" ]; then
+            platform=$(basename "$dir")
+            for file in "$platform"/*; do
+              if [ -f "$file" ]; then
+                mv "$file" "llm-reasoning-proxy-$platform"
+              fi
+            done
+          fi
+        done
+        mkdir -p release
+        cp */llm-reasoning-proxy-* release/
+    
+    - name: Create release notes
+      id: release-notes
+      run: |
+        VERSION="${GITHUB_REF#refs/tags/}"
+        echo "tag_name=${VERSION}" >> $GITHUB_OUTPUT
+        cat > release-notes.md << EOF
+        ## Release v${VERSION}
+        
+        Prebuilt binaries for multiple platforms:
+        
+        - **Windows x86-64**: `llm-reasoning-proxy-windows-x86_64.zip`
+        - **Windows ARM64**: `llm-reasoning-proxy-windows-aarch64.zip`
+        - **macOS ARM64**: `llm-reasoning-proxy-macos-aarch64.tar.gz`
+        - **Linux x86-64**: `llm-reasoning-proxy-linux-x86_64.tar.gz`
+        - **Linux ARM64**: `llm-reasoning-proxy-linux-aarch64.tar.gz`
+        
+        All binaries are statically compiled and ready to use.
+        EOF
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.release-notes.outputs.tag_name }}
+        name: Release v${{ steps.release-notes.outputs.tag_name }}
+        body_path: release-notes.md
+        files: release/*
+        draft: false
+        prerelease: false
+        generate_release_notes: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
