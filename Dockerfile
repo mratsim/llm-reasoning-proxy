@@ -21,14 +21,16 @@ RUN mkdir src && \
 COPY src ./src
 
 # Build the application, this will use the cached dependencies
-RUN cargo build --release
+# We update the timestamp to force a cargo rebuild with actual code
+# Or we might end up with an empty application.
+RUN touch src/main.rs && cargo build --release
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
 
 # Install ca-certificates to allow HTTPS calls
 RUN apt-get update && \
-    apt-get install -y ca-certificates && \
+    apt-get install -y ca-certificates libssl3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
