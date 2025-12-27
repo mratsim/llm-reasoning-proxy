@@ -20,11 +20,19 @@ This proxy intercepts chat completion requests from such providers and wraps rea
 
 1. **Quick Install** - Platform-specific one-liners:
 
-   <details>
+<details>
    <summary>Windows (x86-64 i.e. AMD or Intel)</summary>
 
    ```powershell
-   Invoke-WebRequest -Uri "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-Windows-x86_64.zip" -OutFile "proxy.zip"; Expand-Archive -Path "proxy.zip" -DestinationPath "."; Remove-Item "proxy.zip"
+   Invoke-WebRequest -Uri "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-windows-x86_64.zip" -OutFile "proxy.zip"; Expand-Archive -Path "proxy.zip" -DestinationPath "."; Remove-Item "proxy.zip"
+   ```
+   </details>
+
+   <details>
+   <summary>Windows ARM64</summary>
+
+   ```powershell
+   Invoke-WebRequest -Uri "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-windows-arm64.zip" -OutFile "proxy.zip"; Expand-Archive -Path "proxy.zip" -DestinationPath "."; Remove-Item "proxy.zip"
    ```
    </details>
 
@@ -40,7 +48,7 @@ This proxy intercepts chat completion requests from such providers and wraps rea
    <summary>Linux (Arm64 like Raspberry Pi)</summary>
 
    ```bash
-   curl -sL "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-linux-aarch64.tar.gz" | tar -xz
+   curl -sL "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-linux-arm64.tar.gz" | tar -xz
    ```
    </details>
 
@@ -48,11 +56,11 @@ This proxy intercepts chat completion requests from such providers and wraps rea
    <summary>macOS Apple Silicon</summary>
 
    ```bash
-   curl -sL "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-macos-aarch64.tar.gz" | tar -xz
+   curl -sL "https://github.com/mratsim/llm-reasoning-proxy/releases/latest/download/llm-reasoning-proxy-macos-arm64.tar.gz" | tar -xz
    ```
    </details>
 
-2. **Manual Download** - Visit the [GitHub Releases page](https://github.com/mratsim/llm-reasoning-proxy/releases) and download the appropriate file for your platform and architectur then **extract** the binary:
+2. **Manual Download** - Visit the [GitHub Releases page](https://github.com/mratsim/llm-reasoning-proxy/releases) and download the appropriate file for your platform and architecture then **extract** the binary:
    - **Windows:** Use 7-Zip or built-in extraction
    - **macOS/Linux:** `tar -xzf llm-reasoning-proxy-platform-arch-v<version>.tar.gz`
 
