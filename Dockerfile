@@ -3,7 +3,7 @@ FROM rust:1.92-slim AS builder
 
 # Install dependencies needed for building reqwest (native-tls)
 RUN apt-get update && \
-    apt-get install -y pkg-config libssl-dev && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -30,7 +30,7 @@ FROM debian:bookworm-slim
 
 # Install ca-certificates to allow HTTPS calls
 RUN apt-get update && \
-    apt-get install -y ca-certificates libssl3 && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
