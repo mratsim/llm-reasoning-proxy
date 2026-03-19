@@ -308,7 +308,10 @@ mod logic {
     }
 
     pub fn transform_message(msg: &mut serde_json::Map<String, Value>) {
-        if let Some(r_val) = msg.remove("reasoning").or_else(|| msg.remove("reasoning_content")) {
+        if let Some(r_val) = msg
+            .remove("reasoning")
+            .or_else(|| msg.remove("reasoning_content"))
+        {
             let wrapped = format!("<think>{}</think>", r_val.as_str().unwrap_or(""));
             let existing_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
             let new_content = format!("{}{}", wrapped, existing_content);
@@ -322,7 +325,9 @@ mod logic {
         };
 
         // 1. Extract values
-        let r_val_opt = delta.remove("reasoning").or_else(|| delta.remove("reasoning_content"));
+        let r_val_opt = delta
+            .remove("reasoning")
+            .or_else(|| delta.remove("reasoning_content"));
         let r_str = r_val_opt.as_ref().and_then(|v| v.as_str()).unwrap_or("");
 
         let c_str = delta.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -372,7 +377,7 @@ mod tests {
     use super::logic::*;
     use serde_json::Value;
 
-#[test]
+    #[test]
     fn test_transform_non_streaming_with_reasoning_content() {
         let input = r#"{
             "choices": [{"message": {"content": "Hello", "reasoning_content": "Thinking"}}]
@@ -405,7 +410,7 @@ mod tests {
         assert_eq!(parsed_output, parsed_input);
     }
 
-#[test]
+    #[test]
     fn test_stream_chunk_start_thinking_reasoning_content() {
         let mut state = StreamState::default();
         let mut val = serde_json::json!({
