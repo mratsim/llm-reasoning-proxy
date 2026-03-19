@@ -266,6 +266,14 @@ fn process_sse_stream(
 
 // Transformers are all you need
 // ------------------------------------------------------------
+// `reasoning_content` introduced by DeepSeek was replaced by `reasoning`
+// We need to support both as the current state of affair is messy
+// - RFC: https://github.com/vllm-project/vllm/issues/27755
+// - Deletion: https://github.com/vllm-project/vllm/pull/33402
+// - Deletion followup (pending): https://github.com/vllm-project/vllm/pull/37480
+// - Regression issue: https://github.com/vllm-project/vllm/issues/33616
+// - Reinstatement for chat template: https://github.com/vllm-project/vllm/pull/33635
+// - Regression on downstream and vLLM contradicting its document on backward compat (pending): https://github.com/vllm-project/vllm/pull/34030
 
 mod logic {
     use serde_json::Value;
@@ -300,7 +308,10 @@ mod logic {
     }
 
     pub fn transform_message(msg: &mut serde_json::Map<String, Value>) {
-        if let Some(r_val) = msg.remove("reasoning_content") {
+        if let Some(r_val) = msg
+            .remove("reasoning")
+            .or_else(|| msg.remove("reasoning_content"))
+        {
             let wrapped = format!("<think>{}</think>", r_val.as_str().unwrap_or(""));
             let existing_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
             let new_content = format!("{}{}", wrapped, existing_content);
@@ -314,7 +325,9 @@ mod logic {
         };
 
         // 1. Extract values
-        let r_val_opt = delta.remove("reasoning_content");
+        let r_val_opt = delta
+            .remove("reasoning")
+            .or_else(|| delta.remove("reasoning_content"));
         let r_str = r_val_opt.as_ref().and_then(|v| v.as_str()).unwrap_or("");
 
         let c_str = delta.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -365,9 +378,19 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn test_transform_non_streaming_with_reasoning() {
+    fn test_transform_non_streaming_with_reasoning_content() {
         let input = r#"{
             "choices": [{"message": {"content": "Hello", "reasoning_content": "Thinking"}}]
+        }"#;
+        let output = transform_non_streaming(input);
+        assert!(output.contains("<think>Thinking</think>"));
+        assert!(output.contains("Hello"));
+    }
+
+    #[test]
+    fn test_transform_non_streaming_with_reasoning() {
+        let input = r#"{
+            "choices": [{"message": {"content": "Hello", "reasoning": "Thinking"}}]
         }"#;
         let output = transform_non_streaming(input);
         assert!(output.contains("<think>Thinking</think>"));
@@ -388,10 +411,23 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_chunk_start_thinking() {
+    fn test_stream_chunk_start_thinking_reasoning_content() {
         let mut state = StreamState::default();
         let mut val = serde_json::json!({
             "choices": [{"delta": {"reasoning_content": "Hmm"}}]
+        });
+        transform_stream_chunk(&mut val, &mut state);
+
+        assert!(state.is_thinking);
+        let content = val["choices"][0]["delta"]["content"].as_str().unwrap();
+        assert_eq!(content, "<think>Hmm");
+    }
+
+    #[test]
+    fn test_stream_chunk_start_thinking_reasoning() {
+        let mut state = StreamState::default();
+        let mut val = serde_json::json!({
+            "choices": [{"delta": {"reasoning": "Hmm"}}]
         });
         transform_stream_chunk(&mut val, &mut state);
 
