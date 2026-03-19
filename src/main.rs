@@ -228,10 +228,7 @@ enum LineAction {
 }
 
 /// Process a single SSE line and return the appropriate action.
-fn process_line(
-    line: String,
-    state: &mut StreamState,
-) -> LineAction {
+fn process_line(line: String, state: &mut StreamState) -> LineAction {
     let trimmed = line.trim();
     // 1. Skip empty lines
     if trimmed.is_empty() {
