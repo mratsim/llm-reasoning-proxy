@@ -218,6 +218,55 @@ fn copy_response_headers(
     builder
 }
 
+enum LineAction {
+    /// Emit the given bytes as the next SSE chunk.
+    Yield(Bytes),
+    /// The line was the `[DONE]` sentinel – the stream must finish.
+    Done,
+}
+
+/// Process a single SSE line and return the appropriate action.
+fn process_line(line: String, state: &mut StreamState) -> LineAction {
+    // Tricky part
+    // LinesCodec from tokio-util separates on new lines.
+    // So SSE event `data: {...}\n\n` will be translated into
+    //   `data: {...}`
+    //   ``
+    // To reconstruct this, we need to append \n to all lines (even if empty)
+    // Except [DONE], since we know we won't receive another chunk
+
+    let trimmed = line.trim_end();
+    // 1. Preserve empty line as SSE event delimiter.
+    if trimmed.is_empty() {
+        return LineAction::Yield(Bytes::from_static(b"\n"));
+    }
+    // 2. Handle the [DONE] sentinel – we must break the loop.
+    if trimmed == "data: [DONE]" {
+        return LineAction::Done;
+    }
+    // 3. Handle a normal data line.
+    if let Some(json_str) = trimmed.strip_prefix("data: ") {
+        match serde_json::from_str::<Value>(json_str) {
+            Ok(mut val) => {
+                // Apply think‑token wrapping (or removal) logic.
+                logic::transform_stream_chunk(&mut val, state);
+                let s = format!("data: {}\n", val);
+                LineAction::Yield(Bytes::from(s))
+            }
+            Err(e) => {
+                // Keep the stream alive by sending a generic error frame.
+                error!("JSON Parse Error: {}. Chunk: {}", e, json_str);
+                let err_frame = Bytes::from("data: {\"error\": \"Proxy Parse Error\"}\n");
+                LineAction::Yield(err_frame)
+            }
+        }
+    } else {
+        // 4. Pass‑through for comments or any other event types.
+        let s = format!("{}\n", trimmed);
+        LineAction::Yield(Bytes::from(s))
+    }
+}
+
 /// Processes the SSE stream
 fn process_sse_stream(
     upstream_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -231,34 +280,12 @@ fn process_sse_stream(
 
         while let Some(line_result) = lines.next().await {
             let line = line_result.map_err(axum::Error::new)?;
-            let trimmed = line.trim();
-
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // 1. Handle Done
-            if trimmed == "data: [DONE]" {
-                yield "data: [DONE]\n\n".into();
-                break;
-            }
-
-            // 2. Handle Data
-            if let Some(json_str) = trimmed.strip_prefix("data: ") {
-                match serde_json::from_str::<Value>(json_str) {
-                    Ok(mut val) => {
-                        logic::transform_stream_chunk(&mut val, &mut state);
-                        yield format!("data: {}\n\n", val).into();
-                    }
-                    Err(e) => {
-                        // Log parsing error but keep stream alive or send error frame
-                        error!("JSON Parse Error: {}. Chunk: {}", e, json_str);
-                        yield format!("data: {{\"error\": \"Proxy Parse Error\"}}\n\n").into();
-                    }
+            match process_line(line, &mut state) {
+                LineAction::Yield(b) => yield b.into(),
+                LineAction::Done => {
+                    yield "data: [DONE]\n\n".into();
+                    break
                 }
-            } else {
-                // 3. Pass through comments or other events unmodified
-                yield format!("{}\n", trimmed).into();
             }
         }
     })
