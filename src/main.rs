@@ -221,18 +221,24 @@ fn copy_response_headers(
 enum LineAction {
     /// Emit the given bytes as the next SSE chunk.
     Yield(Bytes),
-    /// Ignore the line (empty/whitespace) and continue.
-    Skip,
     /// The line was the `[DONE]` sentinel – the stream must finish.
     Done,
 }
 
 /// Process a single SSE line and return the appropriate action.
 fn process_line(line: String, state: &mut StreamState) -> LineAction {
-    let trimmed = line.trim();
-    // 1. Skip empty lines
+    // Tricky part
+    // LinesCodec from tokio-util separates on new lines.
+    // So SSE event `data: {...}\n\n` will be translated into
+    //   `data: {...}`
+    //   ``
+    // To reconstruct this, we need to append \n to all lines (even if empty)
+    // Except [DONE], since we know we won't receive another chunk
+
+    let trimmed = line.trim_end();
+    // 1. Preserve empty line as SSE event delimiter.
     if trimmed.is_empty() {
-        return LineAction::Skip;
+        return LineAction::Yield(Bytes::from_static(b"\n"));
     }
     // 2. Handle the [DONE] sentinel – we must break the loop.
     if trimmed == "data: [DONE]" {
@@ -244,14 +250,14 @@ fn process_line(line: String, state: &mut StreamState) -> LineAction {
             Ok(mut val) => {
                 // Apply think‑token wrapping (or removal) logic.
                 logic::transform_stream_chunk(&mut val, state);
-                let s = format!("data: {}\n\n", val);
+                let s = format!("data: {}\n", val);
                 LineAction::Yield(Bytes::from(s))
             }
             Err(e) => {
                 // Keep the stream alive by sending a generic error frame.
                 error!("JSON Parse Error: {}. Chunk: {}", e, json_str);
                 let err_frame =
-                    Bytes::from("data: {\"error\": \"Proxy Parse Error\"}\n\n".to_string());
+                    Bytes::from("data: {\"error\": \"Proxy Parse Error\"}\n");
                 LineAction::Yield(err_frame)
             }
         }
@@ -277,7 +283,6 @@ fn process_sse_stream(
             let line = line_result.map_err(axum::Error::new)?;
             match process_line(line, &mut state) {
                 LineAction::Yield(b) => yield b.into(),
-                LineAction::Skip => {}, // empty line, continue
                 LineAction::Done => {
                     yield "data: [DONE]\n\n".into();
                     break
