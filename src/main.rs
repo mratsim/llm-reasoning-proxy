@@ -256,8 +256,7 @@ fn process_line(line: String, state: &mut StreamState) -> LineAction {
             Err(e) => {
                 // Keep the stream alive by sending a generic error frame.
                 error!("JSON Parse Error: {}. Chunk: {}", e, json_str);
-                let err_frame =
-                    Bytes::from("data: {\"error\": \"Proxy Parse Error\"}\n");
+                let err_frame = Bytes::from("data: {\"error\": \"Proxy Parse Error\"}\n");
                 LineAction::Yield(err_frame)
             }
         }
